@@ -1,4 +1,4 @@
-name: Deploy to velixir
+name: Deploy to Velixir
 
 on:
   push:
@@ -7,8 +7,15 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: velixir/velixir/actions/deploy@v1
-        with:
-          api-key: ${{ secrets.VELIXIR_API_KEY }}
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Velixir CLI
+        run: npm install -g @velixir/cli
+
+      - name: Deploy to Velixir
+        run: velixir deploy --prod
+        env:
+          VELIXIR_TOKEN: ${{ secrets.VELIXIR_TOKEN }}
