@@ -1,16 +1,18 @@
 import os
 import random
 import string
+import json
+import hmac
+import hashlib
 from typing import Dict
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
-from apinator import Apinator
 
 app = FastAPI()
 
 # =========================================================
-# APINATOR
+# APINATOR CONFIG
 # =========================================================
 
 APINATOR_APP_ID = os.environ.get(
@@ -23,18 +25,15 @@ APINATOR_KEY = os.environ.get(
     "app_f96e96143ca0973612fc4f59ad960d22513b4e77"
 )
 
-APINATOR_SECRET = os.environ.get("APINATOR_SECRET", "")
-APINATOR_CLUSTER = os.environ.get("APINATOR_CLUSTER", "eu")
+APINATOR_SECRET = os.environ.get(
+    "APINATOR_SECRET",
+    ""
+)
 
-apinator = None
-
-if APINATOR_SECRET:
-    apinator = Apinator(
-        app_id=APINATOR_APP_ID,
-        key=APINATOR_KEY,
-        secret=APINATOR_SECRET,
-        cluster=APINATOR_CLUSTER
-    )
+APINATOR_CLUSTER = os.environ.get(
+    "APINATOR_CLUSTER",
+    "eu"
+)
 
 
 # =========================================================
@@ -73,12 +72,12 @@ async def home():
         "status": "online",
         "game": "The Bait Game",
         "rooms": len(rooms),
-        "apinator": apinator is not None
+        "apinator_configured": bool(APINATOR_SECRET)
     }
 
 
 # =========================================================
-# APINATOR AUTH
+# APINATOR PRESENCE AUTH
 # =========================================================
 
 @app.post("/realtime/auth")
@@ -89,38 +88,36 @@ async def realtime_auth(data: dict):
 
     if not socket_id or not channel_name:
         return {
-            "success": False,
-            "error": "MISSING_SOCKET_OR_CHANNEL"
+            "error": "missing_socket_id_or_channel_name"
         }
 
-    if apinator is None:
+    if not APINATOR_SECRET:
         return {
-            "success": False,
             "error": "APINATOR_SECRET_NOT_CONFIGURED"
         }
 
-    # نسمح فقط بقنوات presence الخاصة بلعبتنا
+    # Only allow our presence channels
     if not channel_name.startswith("presence-bait-"):
         return {
-            "success": False,
-            "error": "INVALID_CHANNEL"
+            "error": "invalid_channel"
         }
 
-    # نستخرج كود الغرفة من:
-    # presence-bait-ABCDE
-    room_code = channel_name.replace("presence-bait-", "").upper()
+    room_code = channel_name.replace(
+        "presence-bait-",
+        ""
+    ).upper()
 
-    # لازم الغرفة تكون موجودة
+    # Room must exist
     if room_code not in rooms:
         return {
-            "success": False,
-            "error": "ROOM_NOT_FOUND"
+            "error": "room_not_found"
         }
 
-    # اسم اللاعب القادم من الطلب إن وجد
-    player_name = data.get("player_name", "Player")
+    player_name = data.get(
+        "player_name",
+        "Player"
+    )
 
-    # Presence data
     channel_data = {
         "user_id": f"{room_code}-{socket_id}",
         "user_info": {
@@ -128,13 +125,28 @@ async def realtime_auth(data: dict):
         }
     }
 
-    auth = apinator.authenticate_channel(
-        socket_id,
-        channel_name,
-        channel_data
+    channel_data_json = json.dumps(
+        channel_data,
+        separators=(",", ":")
     )
 
-    return auth
+    # Presence authentication string
+    string_to_sign = (
+        f"{socket_id}:{channel_name}:{channel_data_json}"
+    )
+
+    signature = hmac.new(
+        APINATOR_SECRET.encode("utf-8"),
+        string_to_sign.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+
+    auth = f"{APINATOR_KEY}:{signature}"
+
+    return {
+        "auth": auth,
+        "channel_data": channel_data_json
+    }
 
 
 # =========================================================
@@ -161,8 +173,6 @@ async def create_room(data: CreateRoomRequest):
         "success": True,
         "room_code": room_code,
         "player_slot": 1,
-
-        # اسم قناة Apinator التي سيشترك فيها اللاعب
         "channel": f"presence-bait-{room_code}"
     }
 
@@ -238,7 +248,8 @@ async def broadcast(room_code: str, message: dict):
     for websocket in dead_connections:
 
         if websocket in rooms[room_code]["connections"]:
-            rooms[room_code]["connections"].remove(websocket)
+            room = rooms[room_code]
+            room["connections"].remove(websocket)
 
 
 @app.websocket("/ws/{room_code}")
@@ -340,7 +351,7 @@ if __name__ == "__main__":
 
     import uvicorn
 
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.environ.get("PORT", "8000"))
 
     uvicorn.run(
         app,
